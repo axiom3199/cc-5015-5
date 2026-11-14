@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>服装网格 UV 展开工作台</title>
+<link rel="stylesheet" href="/static/style.css">
+<script type="importmap">
+{"imports": {
+  "three": "/static/vendor/three.module.js",
+  "three/addons/controls/OrbitControls.js": "/static/vendor/OrbitControls.js"
+}}
+</script>
+</head>
+<body>
+<header>
+  <span class="logo">服装 UV 展开工作台</span>
+  <select id="testmesh">
+    <option value="cylinder">闭合袖筒（圆筒）</option>
+    <option value="strip">细长弧形衣片</option>
+    <option value="panels">前后双衣片（多连通块）</option>
+    <option value="cube">立方体（缝线环切割）</option>
+    <option value="nonmanifold">非流形扇形（诊断演示）</option>
+  </select>
+  <button id="loadTest">载入测试网格</button>
+  <label class="upload">上传 OBJ<input type="file" id="objFile" accept=".obj"></label>
+  <span id="meshStats">未载入网格</span>
+</header>
+<div id="notice"></div>
+<main>
+  <section>
+    <div class="panel-title">三维网格 — 点击棱边切换接缝（红色）；路径模式下单击两个顶点自动沿最短边路径布缝</div>
+    <div id="view3d"></div>
+    <div class="toolbar">
+      <span>接缝工具：</span>
+      <label><input type="radio" name="mode" value="toggle" checked> 单边切换</label>
+      <label><input type="radio" name="mode" value="path"> 最短路径</label>
+      <button id="applyDemo" class="secondary" style="display:none">应用示例接缝</button>
+      <button id="clearSeams" class="secondary">清空接缝</button>
+      <span id="seamCount"></span>
+    </div>
+  </section>
+  <section id="view2d-wrap">
+    <div class="panel-title">二维展开 — 拖拽平移 / 滚轮缩放 / 双击边界点固定或取消 / 拖动固定点后自动重展</div>
+    <canvas id="view2d"></canvas>
+    <div class="legend" id="legend"></div>
+    <div class="toolbar">
+      <span>畸变着色：</span>
+      <select id="metric">
+        <option value="angle" selected>角度畸变</option>
+        <option value="area">面积畸变</option>
+        <option value="none">不着色</option>
+      </select>
+      <label><input type="checkbox" id="showChecker" checked> 棋盘测试纹理</label>
+      <span id="uvStats"></span>
+    </div>
+  </section>
+  <aside id="side">
+    <div class="box"><h3>拓扑诊断</h3><div id="diag"><span style="color:#888">载入网格后显示</span></div></div>
+    <div class="box">
+      <h3>展开参数</h3>
+      <label>像素密度 (px/几何单位)<input id="texel" type="number" step="1" min="1"></label>
+      <label>纹理尺寸 (px)
+        <select id="texsize"><option>512</option><option selected>1024</option><option>2048</option><option>4096</option></select>
+      </label>
+      <label>图表间距 (px)<input id="pad" type="number" value="8" min="0"></label>
+      <div style="margin-top:6px"><button id="unwrapBtn">执行展开</button></div>
+      <div style="font-size:11px;color:#778;margin-top:4px">所有图表共用同一像素密度；放不下的图表进入 UDIM 平铺，绝不单独缩放。</div>
+    </div>
+    <div class="box" id="warnBox" style="display:none"><h3>展开警告</h3><div id="warnings"></div></div>
+    <div class="box">
+      <h3>版本（人工调整快照）</h3>
+      <button id="saveVer">保存当前为版本</button>
+      <div id="verList"></div>
+    </div>
+    <div class="box">
+      <h3>资产导出</h3>
+      <a id="expObj" href="#" download>OBJ（含 UV）</a>
+      <a id="expPng" href="#" download>棋盘纹理 PNG</a>
+      <a id="expRep" href="#" download>畸变报告 JSON</a>
+      <p class="disclaimer">自动展开结果仅供 UV 布局参考，不保证服装实际可裁剪性；请结合角度/面积畸变、翻转与重叠检查以及人工调整确认。</p>
+    </div>
+  </aside>
+</main>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

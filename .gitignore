@@ -23,3 +23,9 @@ __pycache__/
 *.log
 .env
 .env.*
+
+# Required browser runtime assets, downloaded locally by this project.
+!/app/static/vendor/
+/app/static/vendor/*
+!/app/static/vendor/three.module.js
+!/app/static/vendor/OrbitControls.js
