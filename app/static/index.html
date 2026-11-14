@@ -20,6 +20,7 @@
     <option value="strip">细长弧形衣片</option>
     <option value="panels">前后双衣片（多连通块）</option>
     <option value="cube">立方体（缝线环切割）</option>
+    <option value="mirror">镜像双图岛（共享接缝误差）</option>
     <option value="nonmanifold">非流形扇形（诊断演示）</option>
   </select>
   <button id="loadTest">载入测试网格</button>
@@ -37,11 +38,13 @@
       <label><input type="radio" name="mode" value="path"> 最短路径</label>
       <button id="applyDemo" class="secondary" style="display:none">应用示例接缝</button>
       <button id="clearSeams" class="secondary">清空接缝</button>
+      <button id="optSeams" class="secondary" title="由服饰展开内核按拉伸与共享边误差优化接缝">优化接缝</button>
+      <label><input type="checkbox" id="show3dChecker"> 三维棋盘预览</label>
       <span id="seamCount"></span>
     </div>
   </section>
   <section id="view2d-wrap">
-    <div class="panel-title">二维展开 — 拖拽平移 / 滚轮缩放 / 双击边界点固定或取消 / 拖动固定点后自动重展</div>
+    <div class="panel-title">二维展开 — 编号纹理格 / 双击边界点固定 / 图表列表中可锁定布局、禁止旋转或指定格号</div>
     <canvas id="view2d"></canvas>
     <div class="legend" id="legend"></div>
     <div class="toolbar">
@@ -65,7 +68,21 @@
       </label>
       <label>图表间距 (px)<input id="pad" type="number" value="8" min="0"></label>
       <div style="margin-top:6px"><button id="unwrapBtn">执行展开</button></div>
-      <div style="font-size:11px;color:#778;margin-top:4px">所有图表共用同一像素密度；放不下的图表进入 UDIM 平铺，绝不单独缩放。</div>
+      <div style="font-size:11px;color:#778;margin-top:4px">所有图表共用同一像素密度；放不下的图表进入编号纹理格，绝不单独缩放。</div>
+    </div>
+    <div class="box">
+      <h3>纹理格布局（多纹理分区）</h3>
+      <label><input type="checkbox" id="multiTile"> 启用显式编号纹理格</label>
+      <label><input type="checkbox" id="crossTile"> 允许图表跨格（禁止时整片保留/报告无解）</label>
+      <div id="tileEditor"></div>
+      <button id="addTile" class="secondary" type="button" style="margin-top:4px">新增纹理格</button>
+      <button id="applyLayout" type="button" style="margin-top:4px">应用格布局并重展</button>
+      <div id="layoutReasons" style="color:#c0341d;font-size:11px;margin-top:4px"></div>
+    </div>
+    <div class="box">
+      <h3>图表锁定与格号映射</h3>
+      <div id="chartList" style="font-size:12px;color:#889">执行展开后显示</div>
+      <button id="relayoutBtn" class="secondary" type="button" style="margin-top:4px">仅重排未锁定图表</button>
     </div>
     <div class="box" id="warnBox" style="display:none"><h3>展开警告</h3><div id="warnings"></div></div>
     <div class="box">

@@ -18,6 +18,13 @@ const S = {
   pathStart: null,   // vid
   cam2d: { cx: 0.5, cy: 0.5, s: 400 },
   fitted: false,
+  layout: {
+    enabled: false,
+    allowCrossTile: false,
+    tiles: [],        // {tile_id, texture_size, margin_px, headroom_px, texture}
+    locks: {},        // chart index -> {locked, allow_rotation, tile_id}
+  },
+  checker3d: null,
 };
 
 const edgeKey = (a, b) => a < b ? `${a}_${b}` : `${b}_${a}`;
@@ -44,6 +51,55 @@ dirLight.position.set(2, 3, 4);
 scene.add(dirLight);
 
 let meshObj = null, wireObj = null, seamObj = null, bndObj = null, nmObj = null, pathMark = null;
+
+function makeCheckerTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  const n = 8, s = 256 / n;
+  for (let j = 0; j < n; j++)
+    for (let i = 0; i < n; i++) {
+      g.fillStyle = (i + j) % 2 ? '#3a3f4a' : '#dfe6f0';
+      g.fillRect(i * s, j * s, s, s);
+    }
+  g.strokeStyle = 'rgba(220,60,60,.6)';
+  for (let i = 0; i <= n; i++) {
+    g.beginPath(); g.moveTo(i * s + .5, 0); g.lineTo(i * s + .5, 256); g.stroke();
+    g.beginPath(); g.moveTo(0, i * s + .5); g.lineTo(256, i * s + .5); g.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function apply3dChecker() {
+  if (!meshObj) return;
+  const on = $('show3dChecker').checked && S.result;
+  if (on) {
+    if (!S.checker3d) S.checker3d = makeCheckerTexture();
+    const nV = S.positions.length / 3;
+    const uv = new Float32Array(nV * 2);
+    // charts duplicate UVs per cut vertex; map every local vertex by its
+    // position in the chart's uv array (vertices are duplicated per chart)
+    for (const ch of S.result.charts) {
+      ch.vertices.forEach((vid, li) => {
+        uv[2 * vid] = ch.uv[li][0];
+        uv[2 * vid + 1] = ch.uv[li][1];
+      });
+    }
+    meshObj.geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    meshObj.material = new THREE.MeshStandardMaterial({
+      map: S.checker3d, side: THREE.DoubleSide, flatShading: true,
+      polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+    });
+  } else {
+    meshObj.material = new THREE.MeshStandardMaterial({
+      color: 0x8fa8c8, side: THREE.DoubleSide, flatShading: true,
+      polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+    });
+  }
+}
 
 function disposeObj(o) {
   if (!o) return;
@@ -237,6 +293,43 @@ async function pushSeams() {
   if (r.ok) renderDiag(j.diagnostics);
 }
 
+// Driven by the unwrap kernel: requests seam optimization, then lets the
+// backend re-unwrap so both the 3D model and 2D charts update together.
+async function optimizeSeams() {
+  if (!S.meshId) return;
+  $('optSeams').disabled = true;
+  try {
+    const r = await fetch(`/api/mesh/${S.meshId}/seams/optimize`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ max_iterations: 10, auto_unwrap: true }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      // kernel failure is fed back into the seam/unwrap panel, not swallowed
+      const msg = j.detail?.message || '接缝优化失败';
+      notice(msg);
+      if (j.detail?.kind === 'seam_optimize') renderWarnings([msg]);
+      return;
+    }
+    S.seams = new Set(j.seams.map(e => edgeKey(e[0], e[1])));
+    rebuildSeamLines();
+    renderDiag(j.diagnostics);
+    const worst = Math.max(0, ...j.seam_errors.map(e => e.shared_error));
+    notice(`接缝优化完成：评分 ${j.score.toFixed(3)} · 最大共享边误差 ${worst.toFixed(4)}`);
+    if (j.unwrap) {
+      S.result = j.unwrap;
+      S.fitted = false;
+      renderDiag(j.unwrap.diagnostics);
+      renderWarnings(j.unwrap.warnings);
+      renderChartList();
+      apply3dChecker();
+      draw2D();
+    }
+  } finally {
+    $('optSeams').disabled = false;
+  }
+}
+
 // ============================================================ 2D viewport
 const canvas = $('view2d');
 const ctx2d = canvas.getContext('2d');
@@ -302,16 +395,21 @@ function draw2D() {
   const res = S.result;
   if (!S.fitted) { fitView(res); S.fitted = true; }
 
-  // tile boxes
-  const tiles = res.packing.tiles;
-  for (let t = 0; t < tiles; t++) {
-    const [x0, y0] = uv2screen(t, 0), [x1, y1] = uv2screen(t + 1, 1);
-    ctx2d.strokeStyle = t === 0 ? '#2f6fdd' : '#b08030';
-    ctx2d.lineWidth = t === 0 ? 2 : 1.2;
+  // tile boxes: explicit numbered tiles take precedence; each maps to its
+  // own unit square (u_index, v_index) so near-equal ids never alias
+  const tileSpecs = res.tiles && res.tiles.length
+    ? res.tiles
+    : [{ tile_id: 1001, u_index: 0, v_index: 0, texture_size: res.params.texture_size }];
+  for (const t of tileSpecs) {
+    const u0 = t.u_index ?? 0, v0 = t.v_index ?? 0;
+    const [x0, y0] = uv2screen(u0, v0), [x1, y1] = uv2screen(u0 + 1, v0 + 1);
+    ctx2d.strokeStyle = '#2f6fdd';
+    ctx2d.lineWidth = 2;
     ctx2d.strokeRect(x0, y1, x1 - x0, y0 - y1);
-    ctx2d.fillStyle = '#8899aa';
-    ctx2d.font = '11px sans-serif';
-    ctx2d.fillText(t === 0 ? 'Tile 0 (0-1)' : `UDIM ${1001 + t}`, x0 + 4, y0 - 5);
+    ctx2d.fillStyle = '#44556a';
+    ctx2d.font = 'bold 12px sans-serif';
+    ctx2d.fillText(`纹理格 ${t.tile_id}${t.texture ? ' · ' + t.texture : ''} · ${t.texture_size}px`,
+      x0 + 4, y0 - 5);
   }
 
   const { s } = S.cam2d;
@@ -353,14 +451,16 @@ function draw2D() {
         ctx2d.stroke();
       }
     }
-    // chart label
+    // chart label with lock + tile number
     let cu = 0, cv = 0;
     for (const [u, v] of uv) { cu += u; cv += v; }
     cu /= uv.length; cv /= uv.length;
     const [lx, ly] = uv2screen(cu, cv);
-    ctx2d.fillStyle = 'rgba(30,40,55,0.85)';
-    ctx2d.font = 'bold 12px sans-serif';
-    ctx2d.fillText(`图表 ${ch.index}`, lx - 20, ly);
+    ctx2d.fillStyle = ch.locked ? '#1d4fa3' : 'rgba(30,40,55,0.85)';
+    ctx2d.font = ch.locked ? 'bold 12px sans-serif' : 'bold 12px sans-serif';
+    const lockTag = ch.locked ? ' 🔒' : '';
+    const tileTag = ch.tile_id != null ? ` [格${ch.tile_id}]` : '';
+    ctx2d.fillText(`图表 ${ch.index}${tileTag}${lockTag}`, lx - 24, ly);
   }
 
   // boundary vertices + pins
@@ -379,8 +479,8 @@ function draw2D() {
     }
   }
   legend.textContent =
-    `像素密度 ${res.params.texel_density} px/单位 · 纹理 ${res.params.texture_size}px · ` +
-    `平铺 ${res.packing.tiles}\n角度畸变 max ${res.stats.max_angle_distortion.toFixed(3)} · ` +
+    `像素密度 ${res.params.texel_density} px/单位 · 纹理格 ${(res.tiles || [{ tile_id: 1001 }]).map(t => t.tile_id).join(',')} · ` +
+    `布局 ${res.packing.solved === false ? '无解（见侧栏原因）' : '已容纳'}\n角度畸变 max ${res.stats.max_angle_distortion.toFixed(3)} · ` +
     `翻转 ${res.stats.n_flipped} · 重叠对 ${res.stats.n_overlap_pairs}`;
 }
 
@@ -465,6 +565,127 @@ canvas.addEventListener('wheel', e => {
   draw2D();
 }, { passive: false });
 
+// ==================================================== texture grid layout
+function syncLayoutFromProject(project) {
+  S.layout.enabled = !!(project.tiles && project.tiles.length);
+  S.layout.allowCrossTile = !!project.allow_cross_tile;
+  S.layout.tiles = (project.tiles || []).map(t => ({ ...t }));
+  S.layout.locks = {};
+  for (const [k, v] of Object.entries(project.locks || {}))
+    S.layout.locks[k] = { locked: true, allow_rotation: !!v.allow_rotation,
+                          tile_id: v.tile_id ?? (v.placement && v.placement.tile_id) };
+  $('multiTile').checked = S.layout.enabled;
+  $('crossTile').checked = S.layout.allowCrossTile;
+  renderTileEditor();
+}
+
+function renderTileEditor() {
+  const el = $('tileEditor');
+  if (!S.layout.enabled) { el.innerHTML = ''; return; }
+  if (!S.layout.tiles.length) {
+    S.layout.tiles = [{ tile_id: 1001, texture_size: +$('texsize').value || 1024,
+      margin_px: +$('pad').value || 0, headroom_px: 0, texture: 'default' }];
+  }
+  el.innerHTML = '';
+  S.layout.tiles.forEach((t, i) => {
+    const row = document.createElement('div');
+    row.className = 'tile-row';
+    row.innerHTML = `
+      <input data-f="tile_id" type="number" value="${t.tile_id}" title="显式格号（如 UDIM 1001）">
+      <input data-f="texture_size" type="number" value="${t.texture_size}" title="该格纹理分辨率 px">
+      <button type="button" data-act="del">删除</button>
+      <input data-f="margin_px" type="number" value="${t.margin_px ?? 0}" title="边距 px">
+      <input data-f="headroom_px" type="number" value="${t.headroom_px ?? 0}" title="采样余量 px">
+      <input data-f="texture" type="text" value="${t.texture ?? ''}" placeholder="纹理资源键">
+      <div class="meta">格 ${t.tile_id} · 可用 ${(t.texture_size - 2 * ((t.margin_px ?? 0) + (t.headroom_px ?? 0)))}px · 资源 ${t.texture || '未绑定'}</div>`;
+    row.querySelectorAll('input').forEach(inp => inp.onchange = () => {
+      const f = inp.dataset.f;
+      t[f] = f === 'texture' ? inp.value.trim() : +inp.value;
+      renderTileEditor();
+    });
+    row.querySelector('[data-act=del]').onclick = () => {
+      S.layout.tiles.splice(i, 1);
+      renderTileEditor();
+    };
+    el.appendChild(row);
+  });
+}
+
+async function pushLayout() {
+  const body = {
+    allow_cross_tile: $('crossTile').checked,
+    tiles: S.layout.enabled ? S.layout.tiles : [],
+  };
+  const r = await fetch(`/api/mesh/${S.meshId}/layout`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const j = await r.json();
+  if (!r.ok) { notice(typeof j.detail === 'string' ? j.detail : '格布局配置失败'); return false; }
+  return true;
+}
+
+function renderChartList() {
+  const el = $('chartList');
+  if (!S.result) { el.innerHTML = '<span style="color:#889">执行展开后显示</span>'; return; }
+  const tileIds = (S.result.tiles || [{ tile_id: 1001 }]).map(t => t.tile_id);
+  el.innerHTML = '';
+  S.result.charts.forEach(ch => {
+    const lock = S.layout.locks[ch.index] || { locked: !!ch.locked };
+    const placement = S.result.packing.placements?.[ch.index];
+    const row = document.createElement('div');
+    row.className = 'chart-row' + (lock.locked ? ' locked' : '');
+    const curTile = ch.tile_id ?? tileIds[0];
+    row.innerHTML = `
+      <div class="line"><b>图表 ${ch.index}</b>
+        <select data-f="locked">
+          <option value="0" ${lock.locked ? '' : 'selected'}>可重排</option>
+          <option value="1" ${lock.locked ? 'selected' : ''}>锁定布局</option>
+        </select></div>
+      <div class="line"><span>格号</span>
+        <select data-f="tile_id">${tileIds.map(id =>
+          `<option value="${id}" ${id === (lock.tile_id ?? curTile) ? 'selected' : ''}>${id}</option>`).join('')}
+        </select></div>
+      <label><input type="checkbox" data-f="allow_rotation" ${lock.allow_rotation ? 'checked' : ''}>
+        允许 90° 旋转（默认禁止）</label>
+      ${placement && placement.fits === false
+        ? `<div class="reason">✗ ${placement.reason || '无法容纳'}</div>` : ''}
+      ${placement && placement.fits ? `<div class="meta">占用 ${Math.round(placement.width_px)}×${Math.round(placement.height_px)}px · 格 ${placement.tile_id}</div>` : ''}`;
+    row.querySelector('[data-f=locked]').onchange = async e => {
+      const locked = e.target.value === '1';
+      await setLock(ch.index, locked,
+        row.querySelector('[data-f=allow_rotation]').checked,
+        +row.querySelector('[data-f=tile_id]').value);
+    };
+    row.querySelector('[data-f=tile_id]').onchange = async e => {
+      if (S.layout.locks[ch.index]?.locked)
+        await setLock(ch.index, true,
+          row.querySelector('[data-f=allow_rotation]').checked, +e.target.value);
+    };
+    row.querySelector('[data-f=allow_rotation]').onchange = async e => {
+      if (S.layout.locks[ch.index]?.locked)
+        await setLock(ch.index, true, e.target.checked,
+          +row.querySelector('[data-f=tile_id]').value);
+    };
+    el.appendChild(row);
+  });
+  const reasons = S.result.packing.reasons || [];
+  $('layoutReasons').innerHTML = reasons.map(r => `✗ ${r}`).join('<br>');
+}
+
+async function setLock(chartIndex, locked, allowRotation, tileId) {
+  const r = await fetch(`/api/mesh/${S.meshId}/charts/lock`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chart_index: chartIndex, locked,
+      allow_rotation: allowRotation, tile_id: tileId }),
+  });
+  const j = await r.json();
+  if (!r.ok) { notice(typeof j.detail === 'string' ? j.detail : '锁定失败'); return; }
+  if (locked) S.layout.locks[chartIndex] = { locked: true, allow_rotation: allowRotation, tile_id: tileId };
+  else delete S.layout.locks[chartIndex];
+  await unwrap();
+}
+
 // ============================================================ data flow
 async function loadPayload(p) {
   S.meshId = p.mesh_id;
@@ -480,6 +701,7 @@ async function loadPayload(p) {
   S.pathStart = null;
   S.fitted = false;
   S.demoSeams = p.demo_seams || null;
+  syncLayoutFromProject(p.project);
   $('applyDemo').style.display = S.demoSeams?.length ? '' : 'none';
   buildMesh();
   renderDiag(p.diagnostics);
@@ -559,6 +781,8 @@ async function unwrap() {
   S.fitted = false;
   renderDiag(j.diagnostics);
   renderWarnings(j.warnings);
+  renderChartList();
+  apply3dChecker();
   $('uvStats').textContent =
     `图表 ${j.stats.n_charts} · 角度畸变 max ${j.stats.max_angle_distortion.toFixed(3)} ` +
     `(均值 ${j.stats.mean_angle_distortion.toFixed(3)}) · 翻转 ${j.stats.n_flipped} · ` +
@@ -576,12 +800,13 @@ async function restoreVersion(vid) {
   $('texel').value = j.project.params.texel_density;
   $('texsize').value = j.project.params.texture_size;
   $('pad').value = j.project.params.pad_px;
+  syncLayoutFromProject(j.project);
   S.result = j.result;
   S.fitted = false;
   rebuildSeamLines();
   pushSeams();
-  if (S.result) draw2D();
-  notice('已恢复版本快照');
+  if (S.result) { renderChartList(); apply3dChecker(); draw2D(); }
+  notice('已恢复版本快照（含纹理格、锁定与实际布局）');
 }
 
 // ============================================================ UI wiring
@@ -611,6 +836,41 @@ document.querySelectorAll('input[name=mode]').forEach(r =>
 $('unwrapBtn').onclick = unwrap;
 $('metric').onchange = draw2D;
 $('showChecker').onchange = draw2D;
+$('show3dChecker').onchange = apply3dChecker;
+$('optSeams').onclick = optimizeSeams;
+
+$('multiTile').onchange = e => {
+  S.layout.enabled = e.target.checked;
+  if (S.layout.enabled && !S.layout.tiles.length) renderTileEditor();
+  if (!S.layout.enabled) $('tileEditor').innerHTML = '';
+};
+$('crossTile').onchange = e => { S.layout.allowCrossTile = e.target.checked; };
+$('addTile').onclick = () => {
+  if (!S.layout.enabled) { notice('请先勾选「启用显式编号纹理格」'); return; }
+  const nextId = 1001 + S.layout.tiles.length;
+  S.layout.tiles.push({ tile_id: nextId,
+    texture_size: +$('texsize').value || 1024,
+    margin_px: +$('pad').value || 0, headroom_px: 0,
+    texture: `fabric_${nextId}` });
+  renderTileEditor();
+};
+$('applyLayout').onclick = async () => {
+  if (!(await pushLayout())) return;
+  await unwrap();
+  notice('格布局已应用，已按当前像素密度重排');
+};
+$('relayoutBtn').onclick = async () => {
+  const r = await fetch(`/api/mesh/${S.meshId}/relayout`, { method: 'POST' });
+  const j = await r.json();
+  if (!r.ok) { notice(typeof j.detail === 'string' ? j.detail : '重排失败'); return; }
+  S.result = j;
+  S.fitted = false;
+  renderWarnings(j.warnings);
+  renderChartList();
+  apply3dChecker();
+  draw2D();
+  notice('已重排：锁定图表保持原位，其余图表重新布局');
+};
 $('saveVer').onclick = async () => {
   if (!S.result) return notice('请先执行展开');
   const name = prompt('版本名称', `版本 ${S.versions.length + 1}`);

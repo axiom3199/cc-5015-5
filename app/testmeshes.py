@@ -142,6 +142,61 @@ def cube(k=2, size=1.0):
     return verts, faces, seams
 
 
+def mirror_panels(n_u=10, n_v=16, height=2.0):
+    """Two mirrored curved cloth panels sewn along one straight center seam.
+
+    Left and right halves are mirror images; without the center seam they are
+    one connected panel whose curved outer borders force measurable stretch,
+    cutting the seam yields two mirror islands whose shared border must have
+    matching UV lengths (shared-edge error check)."""
+    verts, faces = [], []
+    seam_edges = []
+
+    def half(sign):
+        base = len(verts)
+        for j in range(n_v + 1):
+            v = j / n_v
+            y = height * (v - 0.5)
+            for i in range(n_u + 1):
+                u = i / n_u
+                # curved panel: depth bulge grows toward the outer (sewn) side
+                x = sign * 0.6 * u
+                z = 0.28 * np.sin(np.pi * v) * u
+                verts.append([x, y, z])
+        for j in range(n_v):
+            for i in range(n_u):
+                a = base + j * (n_u + 1) + i
+                b = a + 1
+                c = a + (n_u + 1) + 1
+                d = a + (n_u + 1)
+                faces.append([a, b, c])
+                faces.append([a, c, d])
+        return base
+
+    base_l = half(-1.0)
+    base_r = half(1.0)
+    # sew center columns (i = 0 of each half): identical x,y,z -> weld them
+    weld = {}
+    for j in range(n_v + 1):
+        vl = base_l + j * (n_u + 1)
+        vr = base_r + j * (n_u + 1)
+        weld[vr] = vl
+    remap = {}
+    out_verts = []
+    for vi, p in enumerate(verts):
+        root = weld.get(vi, vi)
+        if root not in remap:
+            remap[root] = len(out_verts)
+            out_verts.append(verts[root])
+    out_faces = [[remap[weld.get(a, a)], remap[weld.get(b, b)],
+                  remap[weld.get(c, c)]] for a, b, c in faces]
+    for j in range(n_v):
+        a = remap[base_l + j * (n_u + 1)]
+        b = remap[base_l + (j + 1) * (n_u + 1)]
+        seam_edges.append([min(a, b), max(a, b)])
+    return np.array(out_verts), np.array(out_faces), seam_edges
+
+
 def nonmanifold():
     """Three triangles glued along one edge: classic non-manifold fan."""
     verts = np.array([
@@ -173,5 +228,6 @@ GENERATORS = {
     "strip": ("细长弧形衣片", strip),
     "panels": ("前后双衣片（多连通块）", panels),
     "cube": ("立方体（缝线环切割）", cube),
+    "mirror": ("镜像双图岛（共享接缝误差）", mirror_panels),
     "nonmanifold": ("非流形扇形（诊断演示）", nonmanifold),
 }

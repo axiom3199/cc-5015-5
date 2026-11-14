@@ -71,11 +71,24 @@ class Mesh:
 
     def to_obj_with_uv(self, charts) -> str:
         """Export geometry + UVs. Vertices are duplicated per chart so every
-        chart owns its texture coordinates (cuts stay cuts in the file)."""
-        lines = [f"# UV unwrapped by garment-uv-workbench", f"mtllib checker.mtl"]
+        chart owns its texture coordinates (cuts stay cuts in the file).
+        Tile-number -> chart mapping is written as machine-readable comments
+        so the asset carries usable atlas coordinates, not just a picture."""
+        lines = ["# UV unwrapped by garment-uv-workbench", "mtllib checker.mtl"]
+        tile_map = {}
+        for ch in charts:
+            tile_map.setdefault(ch.get("tile_id", ch.get("tile", 0)), []).append(
+                ch["index"])
+        for tile_id, idxs in sorted(tile_map.items(),
+                                    key=lambda kv: (kv[0] is None, kv[0])):
+            lines.append(f"# tile_id={tile_id} charts={','.join(map(str, idxs))}")
         v_offset = 1
         for ch in charts:
             lines.append(f"o {self.name}_chart{ch['index']}")
+            lines.append(
+                f"# chart={ch['index']} tile={ch.get('tile', 0)} "
+                f"tile_id={ch.get('tile_id', 1001)} "
+                f"locked={ch.get('locked', False)}")
             for li, vid in enumerate(ch["vertices"]):
                 x, y, z = self.positions[vid]
                 lines.append(f"v {x:.6f} {y:.6f} {z:.6f}")
